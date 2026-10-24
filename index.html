@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nik bozori</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #fff);
+      --bg2: var(--tg-theme-secondary-bg-color, #f2f3f5);
+      --text: var(--tg-theme-text-color, #111);
+      --hint: var(--tg-theme-hint-color, #888);
+      --accent: var(--tg-theme-button-color, #2481cc);
+      --accent-text: var(--tg-theme-button-text-color, #fff);
+      --danger: #e5484d;
+      --ok: #30a46c;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); font-size: 15px; }
+    main { padding: 12px 16px 80px; }
+    nav { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: var(--bg2); border-top: 1px solid rgba(128,128,128,.2); }
+    nav button { flex: 1; padding: 10px 4px; border: 0; background: none; color: var(--hint); font-size: 12px; }
+    nav button.active { color: var(--accent); font-weight: 600; }
+    nav button span { display: block; font-size: 20px; }
+    h2 { margin: 4px 0 12px; font-size: 20px; }
+    .chips { display: flex; gap: 8px; margin-bottom: 10px; overflow-x: auto; }
+    .chip { padding: 6px 12px; border-radius: 16px; border: 0; background: var(--bg2); color: var(--text); white-space: nowrap; }
+    .chip.active { background: var(--accent); color: var(--accent-text); }
+    input, textarea, select { width: 100%; padding: 11px 12px; font-size: 16px; border-radius: 10px; border: 1px solid rgba(128,128,128,.25); background: var(--bg2); color: var(--text); font-family: inherit; }
+    label { display: block; margin: 12px 0 6px; color: var(--hint); font-size: 13px; }
+    .card { background: var(--bg2); border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .nick { font-weight: 600; font-size: 17px; word-break: break-all; }
+    .price { font-weight: 700; color: var(--accent); white-space: nowrap; }
+    .meta { color: var(--hint); font-size: 13px; margin-top: 4px; }
+    .desc { margin-top: 6px; }
+    .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 8px; background: rgba(128,128,128,.15); }
+    .badge.approved { background: rgba(48,164,108,.15); color: var(--ok); }
+    .badge.rejected { background: rgba(229,72,77,.15); color: var(--danger); }
+    .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .btn { padding: 9px 14px; border-radius: 10px; border: 0; background: var(--accent); color: var(--accent-text); font-size: 14px; }
+    .btn.secondary { background: rgba(128,128,128,.18); color: var(--text); }
+    .btn.danger { background: var(--danger); color: #fff; }
+    .btn.ok { background: var(--ok); color: #fff; }
+    .btn.block { width: 100%; padding: 13px; margin-top: 16px; font-size: 16px; }
+    .empty { text-align: center; color: var(--hint); padding: 40px 0; }
+    .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
+    .stat { background: var(--bg2); border-radius: 12px; padding: 10px; }
+    .stat b { display: block; font-size: 22px; }
+    .stat small { color: var(--hint); }
+  </style>
+</head>
+<body>
+  <main id="view"></main>
+  <nav id="nav"></nav>
+<script>
+const tg = window.Telegram.WebApp;
+tg.ready();
+tg.expand();
+
+const PLATFORMS = { telegram: "✈️ Telegram", instagram: "📸 Instagram" };
+const STATUS = { pending: "Tekshiruvda", approved: "Sotuvda", rejected: "Rad etilgan", sold: "Sotilgan" };
+const state = { tab: "market", platform: "", q: "", adminTab: "pending", me: null };
+
+const $view = document.getElementById("view");
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const money = n => Number(n).toLocaleString("ru-RU") + " so'm";
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", "X-Init-Data": tg.initData },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail?.[0]?.msg || data.detail || "Xatolik yuz berdi");
+  return data;
+}
+
+function alertMsg(text) { tg.showAlert ? tg.showAlert(text) : alert(text); }
+function confirmMsg(text) {
+  return new Promise(r => tg.showConfirm ? tg.showConfirm(text, r) : r(confirm(text)));
+}
+
+function renderNav() {
+  const tabs = [["market", "🛒", "Bozor"], ["sell", "➕", "Sotish"], ["mine", "📋", "E'lonlarim"]];
+  if (state.me?.is_admin) tabs.push(["admin", "⚙️", "Admin"]);
+  document.getElementById("nav").innerHTML = tabs.map(([id, icon, name]) =>
+    `<button class="${state.tab === id ? "active" : ""}" onclick="go('${id}')"><span>${icon}</span>${name}</button>`).join("");
+}
+
+function go(tab) { state.tab = tab; renderNav(); render(); }
+
+function listingCard(l, actions = "") {
+  return `<div class="card">
+    <div class="row"><div class="nick">@${esc(l.nick)}</div><div class="price">${money(l.price)}</div></div>
+    <div class="meta">${PLATFORMS[l.platform]} · sotuvchi ${l.seller_username ? "@" + esc(l.seller_username) : esc(l.seller_name)}
+      ${state.tab !== "market" ? ` · <span class="badge ${l.status}">${STATUS[l.status]}</span>` : ""}</div>
+    ${l.description ? `<div class="desc">${esc(l.description)}</div>` : ""}
+    ${actions ? `<div class="actions">${actions}</div>` : ""}
+  </div>`;
+}
+
+async function renderMarket() {
+  $view.innerHTML = `<h2>Nik bozori</h2>
+    <input id="q" placeholder="🔍 Nik qidirish" value="${esc(state.q)}">
+    <div class="chips" style="margin-top:10px">
+      ${[["", "Hammasi"], ["telegram", PLATFORMS.telegram], ["instagram", PLATFORMS.instagram]].map(([p, n]) =>
+        `<button class="chip ${state.platform === p ? "active" : ""}" onclick="state.platform='${p}';render()">${n}</button>`).join("")}
+    </div><div id="list"><div class="empty">Yuklanmoqda...</div></div>`;
+  const q = document.getElementById("q");
+  let t;
+  q.oninput = () => { clearTimeout(t); t = setTimeout(() => { state.q = q.value; loadMarket(); }, 300); };
+  loadMarket();
+}
+
+async function loadMarket() {
+  const params = new URLSearchParams({ ...(state.platform && { platform: state.platform }), ...(state.q && { q: state.q }) });
+  const items = await api("/api/listings?" + params);
+  document.getElementById("list").innerHTML = items.length
+    ? items.map(l => listingCard(l, l.seller_id === state.me.id ? "" :
+        `<button class="btn" onclick="contact('${esc(l.seller_username)}')">✉️ Sotuvchiga yozish</button>`)).join("")
+    : `<div class="empty">Hozircha e'lonlar yo'q</div>`;
+}
+
+function contact(username) { tg.openTelegramLink("https://t.me/" + username); }
+
+function renderSell() {
+  $view.innerHTML = `<h2>Nikni sotuvga qo'yish</h2>
+    ${state.me.username ? "" : `<div class="card" style="color:var(--danger)">Sotish uchun Telegram sozlamalarida o'zingizga username qo'ying, aks holda xaridorlar siz bilan bog'lana olmaydi.</div>`}
+    <label>Platforma</label>
+    <div class="chips" id="platform">
+      ${Object.entries(PLATFORMS).map(([p, n], i) => `<button class="chip ${i === 0 ? "active" : ""}" data-p="${p}">${n}</button>`).join("")}
+    </div>
+    <label>Nik</label><input id="nick" placeholder="@nik" autocapitalize="off">
+    <label>Narx (so'm)</label><input id="price" type="number" inputmode="numeric" placeholder="500000">
+    <label>Izoh (ixtiyoriy)</label><textarea id="desc" rows="3" maxlength="500" placeholder="Masalan: 2015-yildan beri, kanal bilan birga"></textarea>
+    <button class="btn block" id="submit">Yuborish</button>
+    <div class="meta" style="margin-top:8px">E'lon admin tekshirganidan keyin bozorda ko'rinadi.</div>`;
+  let platform = "telegram";
+  document.querySelectorAll("#platform .chip").forEach(b => b.onclick = () => {
+    platform = b.dataset.p;
+    document.querySelectorAll("#platform .chip").forEach(x => x.classList.toggle("active", x === b));
+  });
+  document.getElementById("submit").onclick = async () => {
+    try {
+      await api("/api/listings", { method: "POST", body: JSON.stringify({
+        platform,
+        nick: document.getElementById("nick").value,
+        price: Number(document.getElementById("price").value),
+        description: document.getElementById("desc").value,
+      }) });
+      tg.HapticFeedback?.notificationOccurred("success");
+      alertMsg("E'lon yuborildi! Admin tasdiqlagach sotuvga chiqadi.");
+      go("mine");
+    } catch (e) { alertMsg(e.message); }
+  };
+}
+
+async function renderMine() {
+  $view.innerHTML = `<h2>Mening e'lonlarim</h2><div id="list"><div class="empty">Yuklanmoqda...</div></div>`;
+  const items = await api("/api/my-listings");
+  document.getElementById("list").innerHTML = items.length ? items.map(l => listingCard(l,
+    (l.status === "approved" ? `<button class="btn ok" onclick="act('/api/listings/${l.id}/sold','POST','Sotildi deb belgilaysizmi?')">💰 Sotildi</button>` : "") +
+    `<button class="btn danger" onclick="act('/api/listings/${l.id}','DELETE',&quot;E'lonni o'chirasizmi?&quot;)">🗑 O'chirish</button>`
+  )).join("") : `<div class="empty">Sizda hali e'lon yo'q</div>`;
+}
+
+async function act(path, method, question) {
+  if (question && !(await confirmMsg(question))) return;
+  try { await api(path, { method }); render(); } catch (e) { alertMsg(e.message); }
+}
+
+async function renderAdmin() {
+  const s = await api("/api/admin/stats");
+  const tabs = [["pending", "⏳ Tekshiruv"], ["approved", "✅ Sotuvda"], ["sold", "💰 Sotilgan"], ["rejected", "❌ Rad"], ["users", "👤 Foydalanuvchilar"]];
+  $view.innerHTML = `<h2>Admin panel</h2>
+    <div class="stats">
+      <div class="stat"><b>${s.users}</b><small>Foydalanuvchilar</small></div>
+      <div class="stat"><b>${s.pending || 0}</b><small>Tekshiruvda</small></div>
+      <div class="stat"><b>${s.approved || 0}</b><small>Sotuvda</small></div>
+      <div class="stat"><b>${s.sold || 0}</b><small>Sotilgan</small></div>
+    </div>
+    <div class="chips">${tabs.map(([id, n]) => `<button class="chip ${state.adminTab === id ? "active" : ""}" onclick="state.adminTab='${id}';render()">${n}</button>`).join("")}</div>
+    <div id="list"><div class="empty">Yuklanmoqda...</div></div>`;
+  const list = document.getElementById("list");
+  if (state.adminTab === "users") {
+    const users = await api("/api/admin/users");
+    list.innerHTML = users.map(u => `<div class="card"><div class="row">
+      <div><div class="nick">${esc(u.first_name)} ${u.username ? "@" + esc(u.username) : ""}</div>
+      <div class="meta">ID ${u.id} · ${u.listings} ta e'lon ${u.banned ? '· <span class="badge rejected">Bloklangan</span>' : ""}</div></div>
+      ${u.banned ? `<button class="btn secondary" onclick="act('/api/admin/users/${u.id}/unban','POST')">Blokdan chiqarish</button>`
+                 : `<button class="btn danger" onclick="act('/api/admin/users/${u.id}/ban','POST','Foydalanuvchini bloklaysizmi? Uning barcha e\\'lonlari olib tashlanadi.')">Bloklash</button>`}
+    </div></div>`).join("") || `<div class="empty">Foydalanuvchilar yo'q</div>`;
+    return;
+  }
+  const items = await api("/api/admin/listings?status=" + state.adminTab);
+  list.innerHTML = items.length ? items.map(l => listingCard(l,
+    (l.status !== "approved" && l.status !== "sold" ? `<button class="btn ok" onclick="act('/api/admin/listings/${l.id}/approve','POST')">✅ Tasdiqlash</button>` : "") +
+    (l.status === "pending" || l.status === "approved" ? `<button class="btn secondary" onclick="act('/api/admin/listings/${l.id}/reject','POST')">❌ Rad etish</button>` : "") +
+    (l.seller_username ? `<button class="btn secondary" onclick="contact('${esc(l.seller_username)}')">✉️ Yozish</button>` : "") +
+    `<button class="btn danger" onclick="act('/api/listings/${l.id}','DELETE',&quot;O'chirasizmi?&quot;)">🗑</button>`
+  )).join("") : `<div class="empty">Bu bo'limda e'lon yo'q</div>`;
+}
+
+async function render() {
+  try {
+    await ({ market: renderMarket, sell: renderSell, mine: renderMine, admin: renderAdmin })[state.tab]();
+  } catch (e) {
+    $view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+(async () => {
+  if (!tg.initData) {
+    $view.innerHTML = `<div class="empty">Bu ilovani Telegram bot orqali oching.</div>`;
+    return;
+  }
+  try { state.me = await api("/api/me"); } catch (e) { $view.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  renderNav();
+  render();
+})();
+</script>
+</body>
+</html>
