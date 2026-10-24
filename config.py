@@ -15,4 +15,6 @@ if not WEBAPP_URL and os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
 USE_WEBHOOK = bool(os.environ.get("RENDER_EXTERNAL_URL")) or os.environ.get("USE_WEBHOOK") == "1"
 ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()}
 DB_PATH = os.environ.get("DB_PATH", "market.db")
+# Doimiy baza (masalan Neon Postgres). Bo'sh bo'lsa SQLite fayl ishlatiladi
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 RUN_BOT = os.environ.get("RUN_BOT", "1") == "1"

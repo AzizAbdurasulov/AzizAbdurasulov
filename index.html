@@ -49,11 +49,33 @@
     .stat { background: var(--bg2); border-radius: 12px; padding: 10px; }
     .stat b { display: block; font-size: 22px; }
     .stat small { color: var(--hint); }
+      .chips.wrap { flex-wrap: wrap; overflow: visible; }
+    .clickable { cursor: pointer; }
+    .stars { color: #f5a623; letter-spacing: 1px; }
+    .rating { color: var(--hint); font-size: 13px; }
+    .sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; z-index: 10; }
+    .sheet { background: var(--bg); width: 100%; max-height: 88vh; overflow-y: auto; border-radius: 16px 16px 0 0; padding: 16px 16px 24px; }
+    .sheet-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .sheet-head h3 { margin: 0; font-size: 18px; }
+    .close { border: 0; background: rgba(128,128,128,.18); color: var(--text); border-radius: 50%; width: 32px; height: 32px; font-size: 16px; }
+    .section-title { margin: 18px 0 8px; font-weight: 600; }
+    .pre { white-space: pre-wrap; word-break: break-word; }
+    .star-pick { display: flex; gap: 6px; font-size: 30px; margin: 6px 0; }
+    .star-pick span { cursor: pointer; color: rgba(128,128,128,.4); }
+    .star-pick span.on { color: #f5a623; }
+    .menu-item { display: flex; align-items: center; gap: 12px; font-size: 16px; }
+    .menu-item .icon { font-size: 22px; }
+    .menu-item .arrow { margin-left: auto; color: var(--hint); }
+    .inline { display: flex; gap: 8px; }
+    .inline > * { flex: 1; }
+    .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--text); font-size: 14px; }
+    .check input { width: auto; }
   </style>
 </head>
 <body>
   <main id="view"></main>
   <nav id="nav"></nav>
+  <div id="sheet"></div>
 <script>
 const tg = window.Telegram.WebApp;
 tg.ready();
@@ -61,11 +83,13 @@ tg.expand();
 
 const PLATFORMS = { telegram: "✈️ Telegram", instagram: "📸 Instagram" };
 const STATUS = { pending: "Tekshiruvda", approved: "Sotuvda", rejected: "Rad etilgan", sold: "Sotilgan" };
-const state = { tab: "market", platform: "", q: "", adminTab: "pending", me: null };
+const state = { tab: "market", platform: "", q: "", adminTab: "pending", me: null, cfg: null };
 
 const $view = document.getElementById("view");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const money = n => Number(n).toLocaleString("ru-RU") + " so'm";
+const money = n => Number(n).toLocaleString("ru-RU") + " " + esc(state.cfg.settings.currency);
+const stars = n => "★".repeat(Math.round(n)) + "☆".repeat(5 - Math.round(n));
+const ratingLabel = (avg, count) => count ? `<span class="stars">★</span> ${Number(avg).toFixed(1)} (${count})` : "Baho yo'q";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -76,37 +100,115 @@ async function api(path, opts = {}) {
   if (!res.ok) throw new Error(data.detail?.[0]?.msg || data.detail || "Xatolik yuz berdi");
   return data;
 }
+const post = (path, body, method = "POST") => api(path, { method, body: JSON.stringify(body) });
 
 function alertMsg(text) { tg.showAlert ? tg.showAlert(text) : alert(text); }
 function confirmMsg(text) {
   return new Promise(r => tg.showConfirm ? tg.showConfirm(text, r) : r(confirm(text)));
 }
+function haptic() { tg.HapticFeedback?.notificationOccurred("success"); }
+
+function openSheet(title, body) {
+  document.getElementById("sheet").innerHTML = `<div class="sheet-bg" onclick="if(event.target===this)closeSheet()">
+    <div class="sheet"><div class="sheet-head"><h3>${title}</h3><button class="close" onclick="closeSheet()">✕</button></div>${body}</div></div>`;
+}
+function closeSheet() { document.getElementById("sheet").innerHTML = ""; }
 
 function renderNav() {
-  const tabs = [["market", "🛒", "Bozor"], ["sell", "➕", "Sotish"], ["mine", "📋", "E'lonlarim"]];
+  const tabs = [["market", "🛒", "Bozor"], ["sell", "➕", "Sotish"], ["mine", "📋", "E'lonlarim"], ["menu", "☰", "Menyu"]];
   if (state.me?.is_admin) tabs.push(["admin", "⚙️", "Admin"]);
   document.getElementById("nav").innerHTML = tabs.map(([id, icon, name]) =>
     `<button class="${state.tab === id ? "active" : ""}" onclick="go('${id}')"><span>${icon}</span>${name}</button>`).join("");
 }
 
-function go(tab) { state.tab = tab; renderNav(); render(); }
+function go(tab) { state.tab = tab; closeSheet(); renderNav(); render(); }
 
-function listingCard(l, actions = "") {
-  return `<div class="card">
+function contact(username) { tg.openTelegramLink("https://t.me/" + String(username).replace(/^@/, "")); }
+
+const listingCache = {};
+function listingCard(l, actions = "", clickable = false) {
+  listingCache[l.id] = l;
+  return `<div class="card ${clickable ? "clickable" : ""}" ${clickable ? `onclick="showListing(${l.id})"` : ""}>
     <div class="row"><div class="nick">@${esc(l.nick)}</div><div class="price">${money(l.price)}</div></div>
-    <div class="meta">${PLATFORMS[l.platform]} · sotuvchi ${l.seller_username ? "@" + esc(l.seller_username) : esc(l.seller_name)}
+    <div class="meta">${PLATFORMS[l.platform]} · ${l.seller_username ? "@" + esc(l.seller_username) : esc(l.seller_name)}
+      · ${ratingLabel(l.seller_rating, l.seller_reviews)}
       ${state.tab !== "market" ? ` · <span class="badge ${l.status}">${STATUS[l.status]}</span>` : ""}</div>
-    ${l.description ? `<div class="desc">${esc(l.description)}</div>` : ""}
-    ${actions ? `<div class="actions">${actions}</div>` : ""}
+    ${l.description ? `<div class="desc pre">${esc(l.description)}</div>` : ""}
+    ${actions ? `<div class="actions" onclick="event.stopPropagation()">${actions}</div>` : ""}
   </div>`;
 }
 
+function paymentList() {
+  const methods = state.cfg.payment_methods;
+  if (!methods.length) return `<div class="meta">To'lov usullari hali qo'shilmagan.</div>`;
+  return methods.map(m => `<div class="card"><b>${esc(m.name)}</b>${m.details ? `<div class="desc pre">${esc(m.details)}</div>` : ""}</div>`).join("");
+}
+
+function showListing(id) {
+  const l = listingCache[id];
+  const mine = l.seller_id === state.me.id;
+  openSheet("@" + esc(l.nick), `
+    <div class="row"><div class="meta">${PLATFORMS[l.platform]}</div><div class="price">${money(l.price)}</div></div>
+    ${l.description ? `<div class="desc pre">${esc(l.description)}</div>` : ""}
+    <div class="card clickable" style="margin-top:12px" onclick="showSeller(${l.seller_id})">
+      <div class="row"><div><b>${esc(l.seller_name)}</b> ${l.seller_username ? "@" + esc(l.seller_username) : ""}
+      <div class="rating">${ratingLabel(l.seller_rating, l.seller_reviews)}</div></div><div class="meta">Profil ›</div></div>
+    </div>
+    <div class="section-title">💳 To'lov usullari</div>${paymentList()}
+    ${mine ? "" : `<button class="btn block" onclick="contact('${esc(l.seller_username)}')">✉️ Sotuvchiga yozish</button>`}`);
+}
+
+let pickedRating = 0;
+async function showSeller(id) {
+  const p = await api("/api/sellers/" + id);
+  const isMe = id === state.me.id;
+  pickedRating = p.my_review?.rating || 0;
+  openSheet(esc(p.seller.first_name) + (p.seller.username ? ` <span class="meta">@${esc(p.seller.username)}</span>` : ""), `
+    <div class="stats">
+      <div class="stat"><b>${p.rating.count ? p.rating.avg.toFixed(1) + " ★" : "—"}</b><small>${p.rating.count} ta baho</small></div>
+      <div class="stat"><b>${p.sold_count}</b><small>Sotilgan</small></div>
+    </div>
+    ${p.seller.username && !isMe ? `<button class="btn secondary" style="width:100%" onclick="contact('${esc(p.seller.username)}')">✉️ Yozish</button>` : ""}
+    ${p.listings.length ? `<div class="section-title">Sotuvdagi niklar</div>` + p.listings.map(l => listingCard(l, "", true)).join("") : ""}
+    ${isMe ? "" : `<div class="section-title">${p.my_review ? "Bahoingizni o'zgartirish" : "Baho qoldirish"}</div>
+      <div class="star-pick" id="pick">${[1, 2, 3, 4, 5].map(n => `<span data-n="${n}" onclick="pickStar(${n})">★</span>`).join("")}</div>
+      <textarea id="review-text" rows="3" maxlength="500" placeholder="Izoh (ixtiyoriy)">${esc(p.my_review?.text)}</textarea>
+      <button class="btn block" onclick="sendReview(${id})">Yuborish</button>`}
+    <div class="section-title">Izohlar (${p.reviews.length})</div>
+    ${p.reviews.map(r => `<div class="card"><div class="row"><b>${esc(r.author_name)}</b><span class="stars">${stars(r.rating)}</span></div>
+      ${r.text ? `<div class="desc pre">${esc(r.text)}</div>` : ""}
+      <div class="meta">${new Date(r.created_at * 1000).toLocaleDateString("ru-RU")}</div></div>`).join("") || `<div class="meta">Hali izoh yo'q</div>`}`);
+  pickStar(pickedRating);
+}
+
+function pickStar(n) {
+  pickedRating = n;
+  document.querySelectorAll("#pick span").forEach(s => s.classList.toggle("on", Number(s.dataset.n) <= n));
+}
+
+async function sendReview(sellerId) {
+  if (!pickedRating) return alertMsg("Yulduzchalardan birini tanlang");
+  try {
+    await post(`/api/sellers/${sellerId}/reviews`, { rating: pickedRating, text: document.getElementById("review-text").value });
+    haptic();
+    await showSeller(sellerId);
+    if (state.tab === "market") loadMarket();
+  } catch (e) { alertMsg(e.message); }
+}
+
+// ---- Bozor ----
+
+function platformChips() {
+  return Object.entries(PLATFORMS).filter(([p]) => p !== "instagram" || state.cfg.settings.allow_instagram === "1");
+}
+
 async function renderMarket() {
-  $view.innerHTML = `<h2>Nik bozori</h2>
+  const chips = [["", "Hammasi"], ...platformChips()];
+  $view.innerHTML = `<h2>${esc(state.cfg.settings.app_name)}</h2>
     <input id="q" placeholder="🔍 Nik qidirish" value="${esc(state.q)}">
     <div class="chips" style="margin-top:10px">
-      ${[["", "Hammasi"], ["telegram", PLATFORMS.telegram], ["instagram", PLATFORMS.instagram]].map(([p, n]) =>
-        `<button class="chip ${state.platform === p ? "active" : ""}" onclick="state.platform='${p}';render()">${n}</button>`).join("")}
+      ${chips.length > 2 ? chips.map(([p, n]) =>
+        `<button class="chip ${state.platform === p ? "active" : ""}" onclick="state.platform='${p}';render()">${n}</button>`).join("") : ""}
     </div><div id="list"><div class="empty">Yuklanmoqda...</div></div>`;
   const q = document.getElementById("q");
   let t;
@@ -119,46 +221,52 @@ async function loadMarket() {
   const items = await api("/api/listings?" + params);
   document.getElementById("list").innerHTML = items.length
     ? items.map(l => listingCard(l, l.seller_id === state.me.id ? "" :
-        `<button class="btn" onclick="contact('${esc(l.seller_username)}')">✉️ Sotuvchiga yozish</button>`)).join("")
+        `<button class="btn" onclick="contact('${esc(l.seller_username)}')">✉️ Yozish</button>
+         <button class="btn secondary" onclick="showListing(${l.id})">Batafsil</button>`, true)).join("")
     : `<div class="empty">Hozircha e'lonlar yo'q</div>`;
 }
 
-function contact(username) { tg.openTelegramLink("https://t.me/" + username); }
+// ---- Sotish ----
 
 function renderSell() {
+  const platforms = platformChips();
   $view.innerHTML = `<h2>Nikni sotuvga qo'yish</h2>
     ${state.me.username ? "" : `<div class="card" style="color:var(--danger)">Sotish uchun Telegram sozlamalarida o'zingizga username qo'ying, aks holda xaridorlar siz bilan bog'lana olmaydi.</div>`}
     <label>Platforma</label>
     <div class="chips" id="platform">
-      ${Object.entries(PLATFORMS).map(([p, n], i) => `<button class="chip ${i === 0 ? "active" : ""}" data-p="${p}">${n}</button>`).join("")}
+      ${platforms.map(([p, n], i) => `<button class="chip ${i === 0 ? "active" : ""}" data-p="${p}">${n}</button>`).join("")}
     </div>
     <label>Nik</label><input id="nick" placeholder="@nik" autocapitalize="off">
-    <label>Narx (so'm)</label><input id="price" type="number" inputmode="numeric" placeholder="500000">
+    <label>Narx (${esc(state.cfg.settings.currency)})</label><input id="price" type="number" inputmode="numeric" placeholder="500000">
     <label>Izoh (ixtiyoriy)</label><textarea id="desc" rows="3" maxlength="500" placeholder="Masalan: 2015-yildan beri, kanal bilan birga"></textarea>
     <button class="btn block" id="submit">Yuborish</button>
-    <div class="meta" style="margin-top:8px">E'lon admin tekshirganidan keyin bozorda ko'rinadi.</div>`;
-  let platform = "telegram";
+    ${state.cfg.settings.require_approval === "1" ? `<div class="meta pre" style="margin-top:8px">${esc(state.cfg.settings.sell_note)}</div>` : ""}`;
+  let platform = platforms[0][0];
   document.querySelectorAll("#platform .chip").forEach(b => b.onclick = () => {
     platform = b.dataset.p;
     document.querySelectorAll("#platform .chip").forEach(x => x.classList.toggle("active", x === b));
   });
   document.getElementById("submit").onclick = async () => {
     try {
-      await api("/api/listings", { method: "POST", body: JSON.stringify({
+      const l = await post("/api/listings", {
         platform,
         nick: document.getElementById("nick").value,
         price: Number(document.getElementById("price").value),
         description: document.getElementById("desc").value,
-      }) });
-      tg.HapticFeedback?.notificationOccurred("success");
-      alertMsg("E'lon yuborildi! Admin tasdiqlagach sotuvga chiqadi.");
+      });
+      haptic();
+      alertMsg(l.status === "approved" ? "E'lon bozorga chiqdi!" : "E'lon yuborildi! Admin tasdiqlagach sotuvga chiqadi.");
       go("mine");
     } catch (e) { alertMsg(e.message); }
   };
 }
 
+// ---- E'lonlarim ----
+
 async function renderMine() {
-  $view.innerHTML = `<h2>Mening e'lonlarim</h2><div id="list"><div class="empty">Yuklanmoqda...</div></div>`;
+  $view.innerHTML = `<h2>Mening e'lonlarim</h2>
+    <button class="btn secondary" style="width:100%;margin-bottom:10px" onclick="showSeller(${state.me.id})">⭐ Mening profilim va izohlar</button>
+    <div id="list"><div class="empty">Yuklanmoqda...</div></div>`;
   const items = await api("/api/my-listings");
   document.getElementById("list").innerHTML = items.length ? items.map(l => listingCard(l,
     (l.status === "approved" ? `<button class="btn ok" onclick="act('/api/listings/${l.id}/sold','POST','Sotildi deb belgilaysizmi?')">💰 Sotildi</button>` : "") +
@@ -171,9 +279,33 @@ async function act(path, method, question) {
   try { await api(path, { method }); render(); } catch (e) { alertMsg(e.message); }
 }
 
+// ---- Menyu ----
+
+function renderMenu() {
+  const s = state.cfg.settings;
+  $view.innerHTML = `<h2>Menyu</h2>
+    ${state.cfg.pages.map(p => `<div class="card clickable menu-item" onclick="showPage(${p.id})">
+      <span class="icon">${esc(p.icon)}</span><span>${esc(p.title)}</span><span class="arrow">›</span></div>`).join("")}
+    <div class="card clickable menu-item" onclick="openSheet('💳 To\\'lov usullari', paymentList())">
+      <span class="icon">💳</span><span>To'lov usullari</span><span class="arrow">›</span></div>
+    ${s.support_username ? `<button class="btn block" onclick="contact('${esc(s.support_username)}')">💬 Admin bilan bog'lanish</button>` : ""}`;
+}
+
+function showPage(id) {
+  const p = state.cfg.pages.find(x => x.id === id);
+  openSheet(esc(p.icon) + " " + esc(p.title), `<div class="pre">${esc(p.content)}</div>`);
+}
+
+// ---- Admin panel ----
+
+const ADMIN_TABS = [
+  ["pending", "⏳ Tekshiruv"], ["approved", "✅ Sotuvda"], ["sold", "💰 Sotilgan"], ["rejected", "❌ Rad"],
+  ["users", "👤 Foydalanuvchilar"], ["reviews", "⭐ Izohlar"],
+  ["settings", "🛠 Sozlamalar"], ["payment_methods", "💳 To'lov usullari"], ["pages", "☰ Menyu"],
+];
+
 async function renderAdmin() {
   const s = await api("/api/admin/stats");
-  const tabs = [["pending", "⏳ Tekshiruv"], ["approved", "✅ Sotuvda"], ["sold", "💰 Sotilgan"], ["rejected", "❌ Rad"], ["users", "👤 Foydalanuvchilar"]];
   $view.innerHTML = `<h2>Admin panel</h2>
     <div class="stats">
       <div class="stat"><b>${s.users}</b><small>Foydalanuvchilar</small></div>
@@ -181,19 +313,14 @@ async function renderAdmin() {
       <div class="stat"><b>${s.approved || 0}</b><small>Sotuvda</small></div>
       <div class="stat"><b>${s.sold || 0}</b><small>Sotilgan</small></div>
     </div>
-    <div class="chips">${tabs.map(([id, n]) => `<button class="chip ${state.adminTab === id ? "active" : ""}" onclick="state.adminTab='${id}';render()">${n}</button>`).join("")}</div>
+    <div class="chips wrap">${ADMIN_TABS.map(([id, n]) => `<button class="chip ${state.adminTab === id ? "active" : ""}" onclick="state.adminTab='${id}';render()">${n}</button>`).join("")}</div>
     <div id="list"><div class="empty">Yuklanmoqda...</div></div>`;
   const list = document.getElementById("list");
-  if (state.adminTab === "users") {
-    const users = await api("/api/admin/users");
-    list.innerHTML = users.map(u => `<div class="card"><div class="row">
-      <div><div class="nick">${esc(u.first_name)} ${u.username ? "@" + esc(u.username) : ""}</div>
-      <div class="meta">ID ${u.id} · ${u.listings} ta e'lon ${u.banned ? '· <span class="badge rejected">Bloklangan</span>' : ""}</div></div>
-      ${u.banned ? `<button class="btn secondary" onclick="act('/api/admin/users/${u.id}/unban','POST')">Blokdan chiqarish</button>`
-                 : `<button class="btn danger" onclick="act('/api/admin/users/${u.id}/ban','POST','Foydalanuvchini bloklaysizmi? Uning barcha e\\'lonlari olib tashlanadi.')">Bloklash</button>`}
-    </div></div>`).join("") || `<div class="empty">Foydalanuvchilar yo'q</div>`;
-    return;
-  }
+  const renderers = { users: adminUsers, reviews: adminReviews, settings: adminSettings, payment_methods: adminItems, pages: adminItems };
+  await (renderers[state.adminTab] || adminListings)(list);
+}
+
+async function adminListings(list) {
   const items = await api("/api/admin/listings?status=" + state.adminTab);
   list.innerHTML = items.length ? items.map(l => listingCard(l,
     (l.status !== "approved" && l.status !== "sold" ? `<button class="btn ok" onclick="act('/api/admin/listings/${l.id}/approve','POST')">✅ Tasdiqlash</button>` : "") +
@@ -203,9 +330,93 @@ async function renderAdmin() {
   )).join("") : `<div class="empty">Bu bo'limda e'lon yo'q</div>`;
 }
 
+async function adminUsers(list) {
+  const users = await api("/api/admin/users");
+  list.innerHTML = users.map(u => `<div class="card"><div class="row">
+    <div class="clickable" onclick="showSeller(${u.id})"><div class="nick">${esc(u.first_name)} ${u.username ? "@" + esc(u.username) : ""}</div>
+    <div class="meta">ID ${u.id} · ${u.listings} ta e'lon ${u.banned ? '· <span class="badge rejected">Bloklangan</span>' : ""}</div></div>
+    ${u.banned ? `<button class="btn secondary" onclick="act('/api/admin/users/${u.id}/unban','POST')">Blokdan chiqarish</button>`
+               : `<button class="btn danger" onclick="act('/api/admin/users/${u.id}/ban','POST','Foydalanuvchini bloklaysizmi? Uning barcha e\\'lonlari olib tashlanadi.')">Bloklash</button>`}
+  </div></div>`).join("") || `<div class="empty">Foydalanuvchilar yo'q</div>`;
+}
+
+async function adminReviews(list) {
+  const reviews = await api("/api/admin/reviews");
+  list.innerHTML = reviews.map(r => `<div class="card">
+    <div class="row"><b>${esc(r.author_name)} → ${esc(r.seller_name)}</b><span class="stars">${stars(r.rating)}</span></div>
+    ${r.text ? `<div class="desc pre">${esc(r.text)}</div>` : ""}
+    <div class="actions"><button class="btn danger" onclick="act('/api/admin/reviews/${r.id}','DELETE','Izohni o\\'chirasizmi?')">🗑 O'chirish</button></div>
+  </div>`).join("") || `<div class="empty">Hali izoh yo'q</div>`;
+}
+
+const SETTING_FIELDS = [
+  ["app_name", "Bozor nomi", "input"],
+  ["welcome_text", "Botdagi salomlashish matni ({name} — foydalanuvchi ismi)", "textarea"],
+  ["open_button", "Botdagi ilovani ochish tugmasi", "input"],
+  ["currency", "Valyuta (masalan: so'm, $)", "input"],
+  ["support_username", "Admin / yordam username (masalan: @admin)", "input"],
+  ["sell_note", "Sotish sahifasidagi eslatma", "textarea"],
+  ["require_approval", "E'lonlarni admin tasdiqlashi kerakmi?", "bool"],
+  ["allow_instagram", "Instagram niklarni sotishga ruxsat", "bool"],
+];
+
+async function adminSettings(list) {
+  const s = await api("/api/admin/settings");
+  list.innerHTML = `<div class="card">${SETTING_FIELDS.map(([key, label, type]) => `<label>${label}</label>` + (
+    type === "textarea" ? `<textarea data-key="${key}" rows="4">${esc(s[key])}</textarea>` :
+    type === "bool" ? `<select data-key="${key}"><option value="1" ${s[key] === "1" ? "selected" : ""}>Ha</option><option value="0" ${s[key] === "1" ? "" : "selected"}>Yo'q</option></select>` :
+    `<input data-key="${key}" value="${esc(s[key])}">`)).join("")}
+    <button class="btn block" onclick="saveSettings()">💾 Saqlash</button></div>`;
+}
+
+async function saveSettings() {
+  const values = {};
+  document.querySelectorAll("#list [data-key]").forEach(el => values[el.dataset.key] = el.value);
+  try {
+    state.cfg.settings = await post("/api/admin/settings", values, "PUT");
+    haptic();
+    alertMsg("Saqlandi");
+  } catch (e) { alertMsg(e.message); }
+}
+
+const ITEM_FIELDS = {
+  payment_methods: [["name", "Nomi (masalan: Click, Payme, Karta)", "input"], ["details", "Ma'lumot (karta raqami, egasi, qo'llanma)", "textarea"]],
+  pages: [["icon", "Belgi (emoji)", "input"], ["title", "Nomi (masalan: Aloqa, Qoidalar, Biz haqimizda)", "input"], ["content", "Matn", "textarea"]],
+};
+
+async function adminItems(list) {
+  const table = state.adminTab;
+  const items = await api("/api/admin/" + table);
+  const hint = table === "pages" ? "Bu bo'limlar Mini App'dagi Menyu'da va botdagi tugmalarda chiqadi." : "Bu to'lov usullari e'lon sahifasida va Menyu'da ko'rinadi.";
+  list.innerHTML = `<div class="meta" style="margin-bottom:10px">${hint}</div>` + items.map(item => `<div class="card" id="item-${item.id}">
+    ${ITEM_FIELDS[table].map(([key, label, type]) => `<label>${label}</label>` + (type === "textarea"
+      ? `<textarea data-key="${key}" rows="3">${esc(item[key])}</textarea>` : `<input data-key="${key}" value="${esc(item[key])}">`)).join("")}
+    <div class="inline"><div><label>Tartib raqami</label><input data-key="sort" type="number" value="${item.sort}"></div>
+      <label class="check"><input data-key="active" type="checkbox" ${item.active ? "checked" : ""}> Ko'rinsin</label></div>
+    <div class="actions"><button class="btn ok" onclick="saveItem('${table}', ${item.id})">💾 Saqlash</button>
+      <button class="btn danger" onclick="act('/api/admin/${table}/${item.id}','DELETE','O\\'chirasizmi?')">🗑 O'chirish</button></div>
+  </div>`).join("") + `<button class="btn block" onclick="addItem('${table}')">➕ Qo'shish</button>`;
+}
+
+async function saveItem(table, id) {
+  const values = {};
+  document.querySelectorAll(`#item-${id} [data-key]`).forEach(el =>
+    values[el.dataset.key] = el.type === "checkbox" ? (el.checked ? 1 : 0) : el.type === "number" ? Number(el.value) : el.value);
+  try { await post(`/api/admin/${table}/${id}`, values, "PUT"); await reloadConfig(); haptic(); alertMsg("Saqlandi"); }
+  catch (e) { alertMsg(e.message); }
+}
+
+async function addItem(table) {
+  const blank = table === "pages" ? { icon: "📄", title: "Yangi bo'lim", content: "" } : { name: "Yangi to'lov usuli", details: "" };
+  try { await post("/api/admin/" + table, { ...blank, sort: 99 }); render(); } catch (e) { alertMsg(e.message); }
+}
+
+async function reloadConfig() { state.cfg = await api("/api/config"); }
+
 async function render() {
   try {
-    await ({ market: renderMarket, sell: renderSell, mine: renderMine, admin: renderAdmin })[state.tab]();
+    if (state.tab === "admin" && ["payment_methods", "pages", "settings"].includes(state.adminTab)) await reloadConfig();
+    await ({ market: renderMarket, sell: renderSell, mine: renderMine, menu: renderMenu, admin: renderAdmin })[state.tab]();
   } catch (e) {
     $view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
   }
@@ -216,7 +427,10 @@ async function render() {
     $view.innerHTML = `<div class="empty">Bu ilovani Telegram bot orqali oching.</div>`;
     return;
   }
-  try { state.me = await api("/api/me"); } catch (e) { $view.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  try {
+    [state.me, state.cfg] = await Promise.all([api("/api/me"), api("/api/config")]);
+  } catch (e) { $view.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  document.title = state.cfg.settings.app_name;
   renderNav();
   render();
 })();

@@ -116,9 +116,29 @@ class NewListing(BaseModel):
     description: str = Field("", max_length=500)
 
 
+class NewReview(BaseModel):
+    rating: int = Field(ge=1, le=5)
+    text: str = Field("", max_length=500)
+
+
+def money(amount, settings=None):
+    settings = settings or db.get_settings()
+    return f"{amount:,}".replace(",", " ") + " " + settings["currency"]
+
+
 @app.get("/api/me")
 def me(user=Depends(current_user)):
     return user
+
+
+@app.get("/api/config")
+def public_config(user=Depends(current_user)):
+    """Mini App uchun admin sozlagan hamma narsa: nomi, matnlar, to'lov usullari, menyu sahifalari."""
+    return {
+        "settings": db.get_settings(),
+        "payment_methods": db.list_items("payment_methods", only_active=True),
+        "pages": db.list_items("pages", only_active=True),
+    }
 
 
 @app.get("/api/listings")
@@ -133,20 +153,22 @@ def my_listings(user=Depends(current_user)):
 
 @app.post("/api/listings")
 async def create_listing(body: NewListing, user=Depends(current_user)):
+    settings = db.get_settings()
     if not user["username"]:
         raise HTTPException(400, "Sotish uchun Telegram profilingizda username bo'lishi kerak (xaridorlar siz bilan bog'lanishi uchun)")
     nick = body.nick.strip().lstrip("@")
-    if body.platform not in NICK_RE:
+    if body.platform not in NICK_RE or (body.platform == "instagram" and settings["allow_instagram"] != "1"):
         raise HTTPException(400, "Platforma noto'g'ri")
     if not NICK_RE[body.platform].match(nick):
         raise HTTPException(400, f"{PLATFORM_NAME[body.platform]} nik formati noto'g'ri")
-    active = [l for l in db.list_listings(platform=body.platform, q=nick) if l["nick"].lower() == nick.lower() and l["status"] in ("pending", "approved")]
-    if active:
+    if any(l["status"] in ("pending", "approved") for l in db.list_listings(platform=body.platform, nick=nick)):
         raise HTTPException(400, "Bu nik allaqachon sotuvda yoki tekshiruvda")
-    listing_id = db.create_listing(user["id"], body.platform, nick, body.price, body.description.strip())
+    status = "pending" if settings["require_approval"] == "1" else "approved"
+    listing_id = db.create_listing(user["id"], body.platform, nick, body.price, body.description.strip(), status)
     await notify.admins(
         f"🆕 Yangi e'lon #{listing_id}\n{PLATFORM_NAME[body.platform]}: <b>@{escape(nick)}</b>\n"
-        f"Narx: {body.price:,} so'm\nSotuvchi: @{escape(user['username'])}\n\nAdmin panelda tasdiqlang."
+        f"Narx: {money(body.price, settings)}\nSotuvchi: @{escape(user['username'])}"
+        + ("\n\nAdmin panelda tasdiqlang." if status == "pending" else "")
     )
     return db.get_listing(listing_id)
 
@@ -171,6 +193,36 @@ def mark_sold(listing_id: int, user=Depends(current_user)):
 def remove_listing(listing_id: int, user=Depends(current_user)):
     own_listing(listing_id, user)
     db.delete_listing(listing_id)
+    return {"ok": True}
+
+
+# ---- Sotuvchi profili, baho va izohlar ----
+
+@app.get("/api/sellers/{seller_id}")
+def seller_profile(seller_id: int, user=Depends(current_user)):
+    seller = db.get_user(seller_id)
+    if not seller:
+        raise HTTPException(404, "Sotuvchi topilmadi")
+    reviews = db.list_reviews(seller_id)
+    return {
+        "seller": {k: seller[k] for k in ("id", "username", "first_name")},
+        "rating": db.seller_rating(seller_id),
+        "reviews": reviews,
+        "my_review": next((r for r in reviews if r["author_id"] == user["id"]), None),
+        "listings": db.list_listings(status="approved", seller_id=seller_id),
+        "sold_count": len(db.list_listings(status="sold", seller_id=seller_id)),
+    }
+
+
+@app.post("/api/sellers/{seller_id}/reviews")
+async def add_review(seller_id: int, body: NewReview, user=Depends(current_user)):
+    if seller_id == user["id"]:
+        raise HTTPException(400, "O'zingizga baho qo'ya olmaysiz")
+    if not db.get_user(seller_id):
+        raise HTTPException(404, "Sotuvchi topilmadi")
+    db.upsert_review(seller_id, user["id"], body.rating, body.text.strip())
+    author = "@" + user["username"] if user["username"] else escape(user["first_name"] or "Foydalanuvchi")
+    await notify.send(seller_id, f"⭐ {author} sizga {'★' * body.rating} baho qo'ydi" + (f":\n{escape(body.text.strip())}" if body.text.strip() else ""))
     return {"ok": True}
 
 
@@ -209,6 +261,56 @@ def admin_ban(user_id: int, action: str, user=Depends(admin_user)):
     if action not in ("ban", "unban"):
         raise HTTPException(404)
     db.set_banned(user_id, action == "ban")
+    return {"ok": True}
+
+
+@app.get("/api/admin/settings")
+def admin_settings(user=Depends(admin_user)):
+    return db.get_settings()
+
+
+@app.put("/api/admin/settings")
+def admin_update_settings(values: dict[str, str], user=Depends(admin_user)):
+    db.update_settings(values)
+    return db.get_settings()
+
+
+@app.get("/api/admin/reviews")
+def admin_reviews(user=Depends(admin_user)):
+    return db.list_reviews()
+
+
+@app.delete("/api/admin/reviews/{review_id}")
+def admin_delete_review(review_id: int, user=Depends(admin_user)):
+    db.delete_review(review_id)
+    return {"ok": True}
+
+
+# To'lov usullari (/api/admin/payment_methods) va menyu sahifalari (/api/admin/pages)
+def item_table(table: str) -> str:
+    if table not in db.EDITABLE:
+        raise HTTPException(404)
+    return table
+
+
+@app.get("/api/admin/{table}")
+def admin_items(table: str, user=Depends(admin_user)):
+    return db.list_items(item_table(table))
+
+
+@app.post("/api/admin/{table}")
+def admin_create_item(table: str, values: dict, user=Depends(admin_user)):
+    return db.create_item(item_table(table), values)
+
+
+@app.put("/api/admin/{table}/{item_id}")
+def admin_update_item(table: str, item_id: int, values: dict, user=Depends(admin_user)):
+    return db.update_item(item_table(table), item_id, values)
+
+
+@app.delete("/api/admin/{table}/{item_id}")
+def admin_delete_item(table: str, item_id: int, user=Depends(admin_user)):
+    db.delete_item(item_table(table), item_id)
     return {"ok": True}
 
 
